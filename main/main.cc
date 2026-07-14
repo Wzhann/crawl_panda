@@ -26,6 +26,7 @@
 #define ENABLE_AUTO_RUN 1      // 1 = compile auto-run feature, 0 = disable entirely
 #define AUTO_RUN_DEFAULT_ON 1  // 1 = active on power-up, 0 = start paused (only when ENABLE_AUTO_RUN=1)
 #define AUTO_RUN_DEFAULT_HARD 0 // 1 = hard swing (instant to extrema + hold), 0 = sin² smooth
+#define HARD_SWING_SPEED_X 2.5f // Hard-swing period multiplier (>1 = faster, e.g. 2.5x)
 
 // === Power management ===
 #define POWER_CTRL_GPIO GPIO_NUM_7 // Latch HIGH = power on, LOW = power off
@@ -1056,7 +1057,8 @@ static void WebCrawlTask(void *arg)
     auto_run_running_ = false;  // Pause auto-run to avoid servo conflict
 #endif
     float t_s = tick * kTickMs / 1000.0f;
-    float phase = t_s / web_crawl_period_s_;
+    float eff_period = auto_run_hard_swing_ ? web_crawl_period_s_ / HARD_SWING_SPEED_X : web_crawl_period_s_;
+    float phase = t_s / eff_period;
     phase = phase - floorf(phase);
 
     // Compute val_lh and val_rh based on mode
@@ -1235,7 +1237,8 @@ static void AutoRunTask(void *arg)
     }
 
     // --- Crawl: continuous phase from tick (no jump on mode switch) ---
-    float phase = (tick * kTickMs / 1000.0f) / kCrawlPeriodS;
+    float eff_period = auto_run_hard_swing_ ? kCrawlPeriodS / HARD_SWING_SPEED_X : kCrawlPeriodS;
+    float phase = (tick * kTickMs / 1000.0f) / eff_period;
     phase = phase - floorf(phase); // fractional part [0, 1)
 
     int lh_angle, rh_angle;
