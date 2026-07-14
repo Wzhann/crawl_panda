@@ -696,81 +696,33 @@ function preset(h, lh, rh){
 }
 
 // ===== CRAWLING: arm sweeps from start to end angle =====
-function makeCrawlBothFrames(lhS, lhE, rhS, rhE, steps){
-  // LH: lhS <-> lhE, RH: rhS <-> rhE (simultaneous, head independent)
-  let frames = [];
-  let segLen = Math.floor(steps/4);
-  if(segLen < 2) segLen = 2;
-  let hold = 3; // hold at endpoints for servo to physically reach
-  for(let i=0; i<=segLen; i++){
-    let t = i/segLen;
-    let ease = t<0.5 ? 2*t*t : 1-Math.pow(-2*t+2,2)/2;
-    let lh = Math.round(lhS + (lhE - lhS) * ease);
-    let rh = Math.round(rhS + (rhE - rhS) * ease);
-    frames.push([REST_H, lh, rh]);
-  }
-  for(let i=0; i<hold; i++) frames.push([REST_H, lhE, rhE]);
-  for(let i=segLen-1; i>=0; i--){
-    let t = i/segLen;
-    let ease = t<0.5 ? 2*t*t : 1-Math.pow(-2*t+2,2)/2;
-    let lh = Math.round(lhS + (lhE - lhS) * ease);
-    let rh = Math.round(rhS + (rhE - rhS) * ease);
-    frames.push([REST_H, lh, rh]);
-  }
-  for(let i=0; i<hold; i++) frames.push([REST_H, lhS, rhS]);
-  return frames;
-}
+// ===== CRAWLING: sin² continuous time-based (same as C++ auto-run) =====
+// Compute [lh, rh] at a given phase [0, 1) in the crawl cycle
+function calcCrawlAngles(phase){
+  let mode = window._crawlMode;
+  let lhS = window._crawlLhS, lhE = window._crawlLhE;
+  let rhS = window._crawlRhS, rhE = window._crawlRhE;
 
-function makeCrawlAltFrames(lhS, lhE, rhS, rhE, steps){
-  // Continuous alternating: LH forward+RH return | hold | LH return+RH forward | hold
-  let frames = [];
-  let segLen = Math.floor(steps / 4);
-  if(segLen < 2) segLen = 2;
-  let hold = 3; // hold frames at endpoints for servo to physically reach
-  // Phase A: LH forward, RH return
-  for(let i=0; i<=segLen; i++){
-    let t = i/segLen;
-    let ease = t<0.5 ? 2*t*t : 1-Math.pow(-2*t+2,2)/2;
-    let lh = Math.round(lhS + (lhE - lhS) * ease);
-    let rh = Math.round(rhS + (rhE - rhS) * (1 - ease));
-    frames.push([REST_H, lh, rh]);
-  }
-  // Hold at endpoints (LH=end, RH=start of opposite)
-  for(let i=0; i<hold; i++) frames.push([REST_H, lhE, rhS]);
-  // Phase B: LH return, RH forward
-  for(let i=0; i<=segLen; i++){
-    let t = i/segLen;
-    let ease = t<0.5 ? 2*t*t : 1-Math.pow(-2*t+2,2)/2;
-    let lh = Math.round(lhS + (lhE - lhS) * (1 - ease));
-    let rh = Math.round(rhS + (rhE - rhS) * ease);
-    frames.push([REST_H, lh, rh]);
-  }
-  // Hold at endpoints (LH=start, RH=end)
-  for(let i=0; i<hold; i++) frames.push([REST_H, lhS, rhE]);
-  return frames;
-}
+  // sin² ease: smooth 0→1→0, no hold frames needed
+  let val_lh = Math.sin(phase * Math.PI);
+  val_lh = val_lh * val_lh;
 
-function makeCrawlSingleFrames(side, sVal, eVal, steps){
-  // Single arm sweep: start->end->hold->start->hold, other arm at rest
-  let frames = [];
-  let segLen = Math.floor(steps/4);
-  if(segLen < 2) segLen = 2;
-  let hold = 3;
-  for(let i=0; i<=segLen; i++){
-    let t = i/segLen;
-    let ease = t<0.5 ? 2*t*t : 1-Math.pow(-2*t+2,2)/2;
-    let a = Math.round(sVal + (eVal - sVal) * ease);
-    frames.push(side==='lh' ? [REST_H, a, REST_RH] : [REST_H, REST_LH, a]);
+  let phase_rh = (mode === 'alt') ? (phase + 0.5) % 1 : phase;
+  let val_rh = Math.sin(phase_rh * Math.PI);
+  val_rh = val_rh * val_rh;
+
+  let lh, rh;
+  if (mode === 'lh') {
+    lh = lhS + (lhE - lhS) * val_lh;
+    rh = REST_RH;
+  } else if (mode === 'rh') {
+    lh = REST_LH;
+    rh = rhS + (rhE - rhS) * val_rh;
+  } else {
+    lh = lhS + (lhE - lhS) * val_lh;
+    rh = rhS + (rhE - rhS) * val_rh;
   }
-  for(let i=0; i<hold; i++) frames.push(side==='lh' ? [REST_H, eVal, REST_RH] : [REST_H, REST_LH, eVal]);
-  for(let i=segLen-1; i>=0; i--){
-    let t = i/segLen;
-    let ease = t<0.5 ? 2*t*t : 1-Math.pow(-2*t+2,2)/2;
-    let a = Math.round(sVal + (eVal - sVal) * ease);
-    frames.push(side==='lh' ? [REST_H, a, REST_RH] : [REST_H, REST_LH, a]);
-  }
-  for(let i=0; i<hold; i++) frames.push(side==='lh' ? [REST_H, sVal, REST_RH] : [REST_H, REST_LH, sVal]);
-  return frames;
+  return [Math.round(lh), Math.round(rh)];
 }
 
 function onCrawlParamChange(){
@@ -780,11 +732,8 @@ function onCrawlParamChange(){
   let lhE = parseInt($('crawlLhEnd').value);
   let rhS = parseInt($('crawlRhStart').value);
   let rhE = parseInt($('crawlRhEnd').value);
-  let steps = 20;
-  let delayMs = Math.round(1000 / (hz * steps));
-  if(delayMs < 20) delayMs = 20;
-  if(delayMs > 1000) delayMs = 1000;
-  let cycleTime = (steps * delayMs / 1000).toFixed(1);
+  let cycleTime = (1 / hz).toFixed(2);
+
   $('crawlFreqVal').textContent = hz.toFixed(2) + ' Hz';
   $('crawlFreqNum').value = hz.toFixed(1);
   $('crawlLhStartVal').textContent = lhS;
@@ -792,19 +741,18 @@ function onCrawlParamChange(){
   $('crawlRhStartVal').textContent = rhS;
   $('crawlRhEndVal').textContent = rhE;
   $('crawlInfo').textContent = '周期 ' + cycleTime + 's | L:'+lhS+'->'+lhE+' R:'+rhS+'->'+rhE;
-  let mode = $('crawlMode').value;
-  if(mode==='lh') window._crawlFrames = makeCrawlSingleFrames('lh', lhS, lhE, steps);
-  else if(mode==='rh') window._crawlFrames = makeCrawlSingleFrames('rh', rhS, rhE, steps);
-  else if(mode==='both') window._crawlFrames = makeCrawlBothFrames(lhS, lhE, rhS, rhE, steps);
-  else window._crawlFrames = makeCrawlAltFrames(lhS, lhE, rhS, rhE, steps);
-  window._crawlDelay = delayMs;
+
+  window._crawlMode = $('crawlMode').value;
+  window._crawlLhS = lhS; window._crawlLhE = lhE;
+  window._crawlRhS = rhS; window._crawlRhE = rhE;
+  window._crawlPeriodS = 1 / hz;
 }
 
 function onCrawlPreset(mode, lhS, lhE, rhS, rhE){
   $('crawlMode').value = mode;
   $('crawlLhStart').value = lhS; $('crawlLhEnd').value = lhE;
   $('crawlRhStart').value = rhS; $('crawlRhEnd').value = rhE;
-  onCrawlParamChange(); // update frames + display values
+  onCrawlParamChange();
   if(crawlRunning) stopCrawl();
   toggleCrawl();
 }
@@ -817,9 +765,11 @@ function onCrawlFreqNum(){
   onCrawlParamChange();
 }
 
-window._crawlFrames = makeCrawlAltFrames(90, 180, 90, 0, 20);
-window._crawlDelay = 100;
-onCrawlParamChange();
+// Default crawl state
+window._crawlMode = 'alt';
+window._crawlLhS = 90; window._crawlLhE = 180;
+window._crawlRhS = 90; window._crawlRhE = 0;
+window._crawlPeriodS = 1.0; // 1 Hz default
 onCrawlParamChange();
 
 async function toggleCrawl(){
@@ -834,17 +784,19 @@ async function toggleCrawl(){
 }
 
 async function runCrawlLoop(){
-  let i = 0;
-  while(crawlRunning){
-    let f = window._crawlFrames;
-    let delay = window._crawlDelay;
-    if(i >= f.length) i = 0;
-    let a = [...f[i]];
-    $('s1').value=a[1]; $('s2').value=a[2];
-    handsJoy.setAngles(a[1], a[2]);
-    await api('/api/servo', {angles:[parseInt($('s0').value), a[1], a[2]]});
-    i = (i+1) % f.length;
-    await new Promise(r => { crawlTimer = setTimeout(r, delay); });
+  const TICK_MS = 50; // 20Hz update rate
+  let t0 = performance.now();
+
+  while (crawlRunning) {
+    let elapsed = (performance.now() - t0) / 1000;
+    let phase = (elapsed / window._crawlPeriodS) % 1;
+
+    let [lh, rh] = calcCrawlAngles(phase);
+    $('s1').value = lh; $('s2').value = rh;
+    handsJoy.setAngles(lh, rh);
+    await api('/api/servo', {angles: [parseInt($('s0').value), lh, rh]});
+
+    await new Promise(r => { crawlTimer = setTimeout(r, TICK_MS); });
   }
 }
 
@@ -857,52 +809,24 @@ function stopCrawl(){
 }
 
 async function crawlStep(){
-  if(crawlRunning) stopCrawl();
-  let f = window._crawlFrames;
-  let delay = window._crawlDelay;
-  for(let a of f){
-    $('s1').value=a[1]; $('s2').value=a[2];
-    handsJoy.setAngles(a[1], a[2]);
-    await api('/api/servo', {angles:[parseInt($('s0').value), a[1], a[2]]});
-    await new Promise(r => setTimeout(r, delay));
+  if (crawlRunning) stopCrawl();
+  const TICK_MS = 50;
+  let t0 = performance.now();
+  let period = window._crawlPeriodS;
+
+  while (true) {
+    let elapsed = (performance.now() - t0) / 1000;
+    if (elapsed >= period) break;
+    let phase = elapsed / period;
+
+    let [lh, rh] = calcCrawlAngles(phase);
+    $('s1').value = lh; $('s2').value = rh;
+    handsJoy.setAngles(lh, rh);
+    await api('/api/servo', {angles: [parseInt($('s0').value), lh, rh]});
+
+    await new Promise(r => setTimeout(r, TICK_MS));
   }
   preset(REST_H, REST_LH, REST_RH);
-}
-
-// ===== Quick anim buttons =====
-
-async function runCrawlBothAnim(){
-  if(crawlRunning) stopCrawl();
-  setStatus('爬行(同时)动画中...','#e67e22');
-  let lhS=parseInt($('crawlLhStart').value), lhE=parseInt($('crawlLhEnd').value);
-  let rhS=parseInt($('crawlRhStart').value), rhE=parseInt($('crawlRhEnd').value);
-  let f = makeCrawlBothFrames(lhS, lhE, rhS, rhE, 20);
-  let delay = window._crawlDelay;
-  for(let a of f){
-    $('s1').value=a[1]; $('s2').value=a[2];
-    handsJoy.setAngles(a[1], a[2]);
-    await api('/api/servo', {angles:[parseInt($('s0').value), a[1], a[2]]});
-    await new Promise(r => setTimeout(r, delay));
-  }
-  preset(REST_H, REST_LH, REST_RH);
-  setStatus('爬行(同时)动画完成','#4ecca3');
-}
-
-async function runCrawlAltAnim(){
-  if(crawlRunning) stopCrawl();
-  setStatus('爬行(交替)动画中...','#e67e22');
-  let lhS=parseInt($('crawlLhStart').value), lhE=parseInt($('crawlLhEnd').value);
-  let rhS=parseInt($('crawlRhStart').value), rhE=parseInt($('crawlRhEnd').value);
-  let f = makeCrawlAltFrames(lhS, lhE, rhS, rhE, 20);
-  let delay = window._crawlDelay;
-  for(let a of f){
-    $('s1').value=a[1]; $('s2').value=a[2];
-    handsJoy.setAngles(a[1], a[2]);
-    await api('/api/servo', {angles:[parseInt($('s0').value), a[1], a[2]]});
-    await new Promise(r => setTimeout(r, delay));
-  }
-  preset(REST_H, REST_LH, REST_RH);
-  setStatus('爬行(交替)动画完成','#4ecca3');
 }
 
 let nodding = false;
