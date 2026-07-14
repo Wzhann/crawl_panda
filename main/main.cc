@@ -25,6 +25,7 @@
 // === Feature toggles ===
 #define ENABLE_AUTO_RUN 1      // 1 = compile auto-run feature, 0 = disable entirely
 #define AUTO_RUN_DEFAULT_ON 1  // 1 = active on power-up, 0 = start paused (only when ENABLE_AUTO_RUN=1)
+#define AUTO_RUN_DEFAULT_HARD 0 // 1 = hard swing (instant to extrema + hold), 0 = sin² smooth
 
 // === Power management ===
 #define POWER_CTRL_GPIO GPIO_NUM_7 // Latch HIGH = power on, LOW = power off
@@ -450,7 +451,8 @@ pre{background:#0a0a1a;color:#4ecca3;padding:8px;border-radius:4px;font-size:10p
 <button class="btn btn-on" id="btnCrawl" onpointerdown="toggleCrawl()">▶ 开始爬行</button>
 <button class="btn btn-play" onpointerdown="crawlStep()">单步爬行</button>
 <button class="btn btn-stop" onpointerdown="stopCrawl()">⏹ 停止</button>
-	<button class="btn" id="btnAutoPlay" style="background:#2ecc71;color:#000" onpointerdown="toggleAutoPlay()">🤖 自运行动画: ON</button>
+	<button class="btn" id="btnAutoPlay" style="background:#2ecc71;color:#000" onpointerdown="toggleAutoPlay()">自运行动画</button>
+	<button class="btn" id="btnHardSwing" style="background:#333;color:#fff" onpointerdown="toggleHardSwing()">曲线: sin²</button>
 </div>
 <div id="crawlStatus" style="font-size:11px;color:#e67e22;margin-top:4px;min-height:16px"></div>
 	<!-- Battery -->
@@ -779,53 +781,45 @@ async function toggleCrawl(){
   $('btnCrawl').className = 'btn btn-stop';
   let mode = $('crawlMode').value;
   let modeNames = {alt:'交替', both:'同时', lh:'左单臂转弯', rh:'右单臂转弯'};
-  $('crawlStatus').textContent = '爬行中: ' + (modeNames[mode]||mode);
-  await runCrawlLoop();
+  $('crawlStatus').textContent = '爬行中(本地): ' + (modeNames[mode]||mode);
+
+  // Send crawl config to ESP32 — it handles timing locally (20ms tick, zero network jitter)
+  let hzX100 = parseInt($('crawlFreq').value);
+  let hz = hzX100 / 100;
+  let lhS = parseInt($('crawlLhStart').value);
+  let lhE = parseInt($('crawlLhEnd').value);
+  let rhS = parseInt($('crawlRhStart').value);
+  let rhE = parseInt($('crawlRhEnd').value);
+  await api('/api/crawl', {
+    mode: mode,
+    lh_start: lhS, lh_end: lhE,
+    rh_start: rhS, rh_end: rhE,
+    period: 1 / hz
+  });
 }
 
 async function runCrawlLoop(){
-  const TICK_MS = 50; // 20Hz update rate
-  let t0 = performance.now();
-
-  while (crawlRunning) {
-    let elapsed = (performance.now() - t0) / 1000;
-    let phase = (elapsed / window._crawlPeriodS) % 1;
-
-    let [lh, rh] = calcCrawlAngles(phase);
-    $('s1').value = lh; $('s2').value = rh;
-    handsJoy.setAngles(lh, rh);
-    await api('/api/servo', {angles: [parseInt($('s0').value), lh, rh]});
-
-    await new Promise(r => { crawlTimer = setTimeout(r, TICK_MS); });
-  }
+  // No-op: crawl now runs on ESP32, no per-frame HTTP needed
 }
 
 function stopCrawl(){
   crawlRunning = false;
-  if(crawlTimer) clearTimeout(crawlTimer);
   $('btnCrawl').textContent = '▶ 开始爬行';
   $('btnCrawl').className = 'btn btn-on';
   $('crawlStatus').textContent = '已停止';
+  api('/api/crawl', {action:'stop'});
 }
 
 async function crawlStep(){
+  // Run one cycle: start crawl, wait one period, then stop
   if (crawlRunning) stopCrawl();
-  const TICK_MS = 50;
-  let t0 = performance.now();
-  let period = window._crawlPeriodS;
-
-  while (true) {
-    let elapsed = (performance.now() - t0) / 1000;
-    if (elapsed >= period) break;
-    let phase = elapsed / period;
-
-    let [lh, rh] = calcCrawlAngles(phase);
-    $('s1').value = lh; $('s2').value = rh;
-    handsJoy.setAngles(lh, rh);
-    await api('/api/servo', {angles: [parseInt($('s0').value), lh, rh]});
-
-    await new Promise(r => setTimeout(r, TICK_MS));
-  }
+  await new Promise(r => setTimeout(r, 100)); // let stop take effect
+  toggleCrawl();
+  let hzX100 = parseInt($('crawlFreq').value);
+  let hz = hzX100 / 100;
+  let periodMs = (1 / hz) * 1000;
+  await new Promise(r => setTimeout(r, periodMs));
+  stopCrawl();
   preset(REST_H, REST_LH, REST_RH);
 }
 
@@ -940,28 +934,32 @@ updateBattery();
 // ===== Auto-play toggle (ESP32 built-in auto-run) =====
 async function toggleAutoPlay(){
   let r = await api('/api/autoplay', {});
-  if(r){
-    try{
-      let s = JSON.parse(r);
-      updateAutoPlayBtn(s.autoplay ? 'ON' : 'OFF');
-    }catch(e){}
-  }
+  if(r){ try{ let s = JSON.parse(r); refreshAutoPlayUI(s); }catch(e){} }
 }
-function updateAutoPlayBtn(state){
+async function toggleHardSwing(){
+  // Read current state, then flip
+  let r0 = await api('/api/autoplay');
+  let cur = false;
+  if(r0){ try{ cur = JSON.parse(r0).hard_swing; }catch(e){} }
+  let r = await api('/api/autoplay', {hard_swing: !cur});
+  if(r){ try{ let s = JSON.parse(r); refreshAutoPlayUI(s); }catch(e){} }
+}
+function refreshAutoPlayUI(s){
   let btn = $('btnAutoPlay');
-  btn.textContent = '🤖 自运行动画: ' + state;
-  btn.style.background = state === 'ON' ? '#2ecc71' : '#555';
-  btn.style.color = state === 'ON' ? '#000' : '#fff';
+  let on = s.autoplay;
+  btn.textContent = '自运行动画: ' + (on ? 'ON' : 'OFF');
+  btn.style.background = on ? '#2ecc71' : '#555';
+  btn.style.color = on ? '#000' : '#fff';
+
+  let hbtn = $('btnHardSwing');
+  let hard = s.hard_swing;
+  hbtn.textContent = '曲线: ' + (hard ? '硬摆' : 'sin²');
+  hbtn.style.background = hard ? '#e67e22' : '#333';
 }
-// Poll auto-play state on load
+// Poll state on load
 (async function(){
   let r = await api('/api/autoplay');
-  if(r){
-    try{
-      let s = JSON.parse(r);
-      updateAutoPlayBtn(s.autoplay ? 'ON' : 'OFF');
-    }catch(e){}
-  }
+  if(r){ try{ let s = JSON.parse(r); refreshAutoPlayUI(s); }catch(e){} }
 })();
 
 // Bind head nod button reliably
@@ -980,6 +978,7 @@ static esp_err_t HandleRoot(httpd_req_t *req)
 
 #if ENABLE_AUTO_RUN
 static volatile bool auto_run_running_ = AUTO_RUN_DEFAULT_ON;
+static volatile bool auto_run_hard_swing_ = AUTO_RUN_DEFAULT_HARD;
 #endif
 
 static esp_err_t HandleServo(httpd_req_t *req)
@@ -1035,6 +1034,78 @@ static esp_err_t HandleBattery(httpd_req_t *req)
   return ESP_OK;
 }
 
+// === Web-triggered crawl task (runs locally, no per-frame HTTP) ===
+static volatile bool web_crawl_running_ = false;
+static float web_crawl_period_s_ = 2.0f;
+static int web_crawl_lh_start_ = 90, web_crawl_lh_end_ = 30;
+static int web_crawl_rh_start_ = 90, web_crawl_rh_end_ = 180;
+static char web_crawl_mode_[8] = "alt";
+
+static void WebCrawlTask(void *arg)
+{
+  constexpr int kTickMs = 20;
+  uint32_t tick = 0;
+  ESP_LOGI(TAG, "Web crawl start: mode=%s period=%.1fs L:%d->%d R:%d->%d",
+           web_crawl_mode_, (double)web_crawl_period_s_,
+           web_crawl_lh_start_, web_crawl_lh_end_,
+           web_crawl_rh_start_, web_crawl_rh_end_);
+
+  while (web_crawl_running_)
+  {
+#if ENABLE_AUTO_RUN
+    auto_run_running_ = false;  // Pause auto-run to avoid servo conflict
+#endif
+    float t_s = tick * kTickMs / 1000.0f;
+    float phase = t_s / web_crawl_period_s_;
+    phase = phase - floorf(phase);
+
+    // Compute val_lh and val_rh based on mode
+    float val_lh, val_rh;
+    if (auto_run_hard_swing_) {
+      // Hard swing: [0, 0.5) = start, [0.5, 1.0) = end
+      bool at_end = (phase >= 0.5f);
+      val_lh = at_end ? 1.0f : 0.0f;
+      bool is_alt = (strcmp(web_crawl_mode_, "alt") == 0);
+      bool rh_at_end = is_alt ? !at_end : at_end;
+      val_rh = rh_at_end ? 1.0f : 0.0f;
+    } else {
+      // sin² smooth
+      val_lh = sinf(phase * M_PI);
+      val_lh = val_lh * val_lh;
+      float phase_rh = (strcmp(web_crawl_mode_, "alt") == 0) ? (phase + 0.5f) : phase;
+      phase_rh = phase_rh - floorf(phase_rh);
+      val_rh = sinf(phase_rh * M_PI);
+      val_rh = val_rh * val_rh;
+    }
+
+    int lh, rh;
+    if (strcmp(web_crawl_mode_, "lh") == 0) {
+      lh = web_crawl_lh_start_ + (int)((web_crawl_lh_end_ - web_crawl_lh_start_) * val_lh);
+      rh = 90;
+    } else if (strcmp(web_crawl_mode_, "rh") == 0) {
+      lh = 90;
+      rh = web_crawl_rh_start_ + (int)((web_crawl_rh_end_ - web_crawl_rh_start_) * val_rh);
+    } else {
+      lh = web_crawl_lh_start_ + (int)((web_crawl_lh_end_ - web_crawl_lh_start_) * val_lh);
+      rh = web_crawl_rh_start_ + (int)((web_crawl_rh_end_ - web_crawl_rh_start_) * val_rh);
+    }
+
+    SetServoAngle(1, lh);
+    SetServoAngle(2, rh);
+
+    tick++;
+    vTaskDelay(pdMS_TO_TICKS(kTickMs));
+  }
+
+  // Return servos to rest
+  SetServoAngle(1, 90);
+  SetServoAngle(2, 90);
+  ESP_LOGI(TAG, "Web crawl stopped");
+  vTaskDelete(nullptr);
+}
+
+static esp_err_t HandleCrawl(httpd_req_t *req);
+
 #if ENABLE_AUTO_RUN
 static esp_err_t HandleAutoPlay(httpd_req_t *req);
 #endif
@@ -1042,7 +1113,7 @@ static esp_err_t HandleAutoPlay(httpd_req_t *req);
 static void StartHttpServer()
 {
   httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-  cfg.max_uri_handlers = 8;
+  cfg.max_uri_handlers = 10;
   httpd_handle_t server = nullptr;
   httpd_start(&server, &cfg);
 
@@ -1061,6 +1132,9 @@ static void StartHttpServer()
   httpd_register_uri_handler(server, &autoplay_get);
   httpd_register_uri_handler(server, &autoplay_post);
 #endif
+
+  httpd_uri_t crawl = {.uri = "/api/crawl", .method = HTTP_POST, .handler = HandleCrawl, .user_ctx = nullptr};
+  httpd_register_uri_handler(server, &crawl);
 
   ESP_LOGI(TAG, "HTTP server started on http://192.168.4.1");
 }
@@ -1081,10 +1155,10 @@ static void AutoRunTask(void *arg)
   constexpr float kHeadPeriodS = 1.5f;
 
   constexpr int kLhStart = 90;
-  constexpr int kLhEnd = 30;
+  constexpr int kLhEnd = 0;
   constexpr int kRhStart = 90;
   constexpr int kRhEnd = 180;
-  constexpr float kCrawlPeriodS = 2.0f;
+  constexpr float kCrawlPeriodS = 0.8f;
   constexpr int kModeSwitchS = 8;
   constexpr float kBlendDurationS = 1.0f; // crossfade between modes
 
@@ -1097,8 +1171,8 @@ static void AutoRunTask(void *arg)
   bool blend_from_alt = false;
   uint32_t blend_start_tick = 0;
 
-  // Helper: compute LH+RH angles for a given mode at a given continuous phase
-  auto calcCrawl = [](float phase, bool is_alt, int &lh, int &rh) {
+  // Helper: smooth sin² crawl (default)
+  auto calcCrawlSmooth = [](float phase, bool is_alt, int &lh, int &rh) {
     float val_lh = sinf(phase * M_PI);
     val_lh = val_lh * val_lh; // sin²: 0→1→0
     float phase_rh = is_alt ? (phase + 0.5f) : phase;
@@ -1107,6 +1181,24 @@ static void AutoRunTask(void *arg)
     val_rh = val_rh * val_rh;
     lh = kLhStart + (int)((kLhEnd - kLhStart) * val_lh);
     rh = kRhStart + (int)((kRhEnd - kRhStart) * val_rh);
+  };
+
+  // Helper: hard swing — instant jump to extrema + hold (no smooth curve)
+  auto calcCrawlHard = [](float phase, bool is_alt, int &lh, int &rh) {
+    // [0, 0.5): start position, [0.5, 1.0): end position
+    bool at_end = (phase >= 0.5f);
+    int lh_val = at_end ? 1 : 0;
+    int rh_val = (is_alt ? !at_end : at_end) ? 1 : 0;
+    lh = kLhStart + (kLhEnd - kLhStart) * lh_val;
+    rh = kRhStart + (kRhEnd - kRhStart) * rh_val;
+  };
+
+  // Pick the active crawl function based on mode
+  auto calcCrawl = [&](float phase, bool is_alt, int &lh, int &rh) {
+    if (auto_run_hard_swing_)
+      calcCrawlHard(phase, is_alt, lh, rh);
+    else
+      calcCrawlSmooth(phase, is_alt, lh, rh);
   };
 
   ESP_LOGI(TAG, "Auto-run started: head nod ±%d°, crawl alt/both %ds each, blend %.1fs",
@@ -1186,26 +1278,29 @@ static esp_err_t HandleAutoPlay(httpd_req_t *req)
 {
   if (req->method == HTTP_POST)
   {
-    char buf[32] = {};
+    char buf[64] = {};
     httpd_req_recv(req, buf, sizeof(buf) - 1);
-    // Toggle: POST without body toggles, or pass {"enable":0/1}
+    // Parse {"enable":0/1} or toggle
     const char *p = strstr(buf, "\"enable\":");
-    if (p)
-    {
-      p += 9;
-      auto_run_running_ = (atoi(p) != 0);
-    }
-    else
-    {
+    if (p) { p += 9; auto_run_running_ = (atoi(p) != 0); }
+    else if (!strstr(buf, "hard_swing"))
       auto_run_running_ = !auto_run_running_;
-    }
+
+    // Parse {"hard_swing":true/false}
+    p = strstr(buf, "\"hard_swing\":");
+    if (p) { p += 13; auto_run_hard_swing_ = (strncmp(p, "true", 4) == 0 || atoi(p) == 1); }
   }
-  // GET or POST response: return current state
-  char resp[64];
-  snprintf(resp, sizeof(resp), "{\"autoplay\":%s}", auto_run_running_ ? "true" : "false");
+  // GET or POST response: return current state + mode
+  char resp[96];
+  snprintf(resp, sizeof(resp),
+           "{\"autoplay\":%s,\"hard_swing\":%s}",
+           auto_run_running_ ? "true" : "false",
+           auto_run_hard_swing_ ? "true" : "false");
   httpd_resp_set_type(req, "application/json");
   httpd_resp_sendstr(req, resp);
-  ESP_LOGI(TAG, "Auto-play %s", auto_run_running_ ? "ON" : "OFF");
+  ESP_LOGI(TAG, "Auto-play %s, hard_swing=%s",
+           auto_run_running_ ? "ON" : "OFF",
+           auto_run_hard_swing_ ? "ON" : "OFF");
   return ESP_OK;
 }
 
@@ -1215,6 +1310,65 @@ static void InitAutoRun()
   ESP_LOGI(TAG, "Auto-run task created");
 }
 #endif  // ENABLE_AUTO_RUN
+
+// --- /api/crawl handler: start/stop web-triggered crawl on ESP32 ---
+static esp_err_t HandleCrawl(httpd_req_t *req)
+{
+  char buf[256] = {};
+  int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
+  if (ret <= 0) { httpd_resp_send_500(req); return ESP_FAIL; }
+  buf[ret] = 0;
+
+  // Check for stop command
+  if (strstr(buf, "\"action\":\"stop\""))
+  {
+    web_crawl_running_ = false;
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_sendstr(req, "OK");
+    return ESP_OK;
+  }
+
+  // Parse parameters for start
+  auto parse_int = [&](const char *key, int def) -> int {
+    const char *p = strstr(buf, key);
+    if (p) { p += strlen(key) + 2; return atoi(p); }
+    return def;
+  };
+  auto parse_float = [&](const char *key, float def) -> float {
+    const char *p = strstr(buf, key);
+    if (p) { p += strlen(key) + 2; return atof(p); }
+    return def;
+  };
+
+  const char *mode_p = strstr(buf, "\"mode\":\"");
+  if (mode_p)
+  {
+    mode_p += 8;
+    strncpy(web_crawl_mode_, mode_p, sizeof(web_crawl_mode_) - 1);
+    // Trim closing quote
+    char *q = strchr(web_crawl_mode_, '"');
+    if (q) *q = 0;
+  }
+
+  web_crawl_lh_start_ = parse_int("\"lh_start\"", 90);
+  web_crawl_lh_end_   = parse_int("\"lh_end\"", 30);
+  web_crawl_rh_start_ = parse_int("\"rh_start\"", 90);
+  web_crawl_rh_end_   = parse_int("\"rh_end\"", 180);
+  web_crawl_period_s_  = parse_float("\"period\"", 2.0f);
+  if (web_crawl_period_s_ < 0.3f) web_crawl_period_s_ = 0.3f;
+  if (web_crawl_period_s_ > 20.0f) web_crawl_period_s_ = 20.0f;
+
+  // If already running, stop it first
+  web_crawl_running_ = false;
+  vTaskDelay(pdMS_TO_TICKS(50));
+
+  web_crawl_running_ = true;
+  xTaskCreate(WebCrawlTask, "web_crawl", 4096, nullptr, 3, nullptr);
+
+  httpd_resp_set_type(req, "text/plain");
+  httpd_resp_sendstr(req, "OK");
+  return ESP_OK;
+}
 
 extern "C" void app_main()
 {
