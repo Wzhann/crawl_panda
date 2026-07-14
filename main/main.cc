@@ -26,7 +26,7 @@
 #define ENABLE_AUTO_RUN 1      // 1 = compile auto-run feature, 0 = disable entirely
 #define AUTO_RUN_DEFAULT_ON 1  // 1 = active on power-up, 0 = start paused (only when ENABLE_AUTO_RUN=1)
 #define AUTO_RUN_DEFAULT_HARD 0 // 1 = hard swing (instant to extrema + hold), 0 = sin² smooth
-#define HARD_SWING_SPEED_X 2.5f // Hard-swing period multiplier (>1 = faster, e.g. 2.5x)
+#define HARD_SWING_SPEED_X 4.0f // Hard-swing period multiplier (>1 = faster, 4x = continuous)
 
 // === Power management ===
 #define POWER_CTRL_GPIO GPIO_NUM_7 // Latch HIGH = power on, LOW = power off
