@@ -179,10 +179,19 @@ action_breathe_xu/
 ├── CMakeLists.txt
 ├── main/
 │   ├── CMakeLists.txt
-│   └── main.cc              # 全部源码 (C++ + HTML/JS)
+│   ├── config.h              # 引脚、参数、编译宏
+│   ├── main.cc               # 入口 app_main（仅初始化调用）
+│   ├── power.h / power.cc    # 电源管理：IO7锁存、IO6按键、电池ADC
+│   ├── servo.h / servo.cc    # 舵机 PWM：50Hz 3路180°
+│   ├── wifi.h / wifi.cc      # WiFi AP
+│   ├── auto_run.h / auto_run.cc  # 自运行动画（编译宏可选）
+│   └── http_server.h / http_server.cc  # HTTP服务 + Web控制面板(内嵌HTML)
+├── sdkconfig
 ├── sdkconfig.defaults
 ├── .gitignore
-└── .devcontainer/           # VS Code Dev Container
+├── .clangd
+├── .devcontainer/           # VS Code Dev Container
+└── .vscode/
 ```
 
 ## 设计要点
